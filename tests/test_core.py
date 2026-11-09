@@ -118,9 +118,9 @@ def test_legacy_absolute_history_without_identity_is_refused(tmp_path):
 def test_undo_preflights_entire_batch(tmp_path, problem):
     directory, originals = make_batch(tmp_path)
     history = HistoryManager(tmp_path / "history.json")
-    execute_rename(build_rename_plan(find_files(directory), pattern="lower"), history)
+    execute_rename(build_rename_plan(find_files(directory), prefix="renamed_"), history)
     if problem == "missing":
-        (directory / "a.txt").unlink()
+        (directory / "renamed_A.txt").unlink()
         expected_error = FileNotFoundError
     elif problem == "occupied":
         (directory / "A.txt").write_text("unrelated")
@@ -133,7 +133,7 @@ def test_undo_preflights_entire_batch(tmp_path, problem):
     with pytest.raises(expected_error):
         execute_undo(history)
     assert sorted(p.name for p in directory.iterdir()) == before_names
-    assert (directory / "b.txt").read_text() == originals["B.txt"]
+    assert (directory / "renamed_B.txt").read_text() == originals["B.txt"]
     assert history.history_file.read_bytes() == before_history
     if problem == "occupied":
         assert (directory / "A.txt").read_text() == "unrelated"

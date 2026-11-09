@@ -1,6 +1,7 @@
 """Core renaming engine and filesystem operations."""
 
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -82,7 +83,7 @@ def build_rename_plan(
             RenamePlan(
                 src=file_path,
                 dst=dst_path,
-                has_changed=(file_path != dst_path),
+                has_changed=(str(file_path) != str(dst_path)),
             )
         )
 
@@ -94,9 +95,37 @@ def _exists(path: Path) -> bool:
     return os.path.lexists(path)
 
 
+def _entry_key(path: Path, directory_names: dict) -> tuple:
+    """Identify case aliases without conflating distinct hardlink entries."""
+    names = directory_names.setdefault(path.parent, None)
+    if names is None:
+        names = {entry.name for entry in path.parent.iterdir()}
+        directory_names[path.parent] = names
+    parent_stat = path.parent.stat()
+    if parent_stat.st_ino <= 0:
+        raise ValueError(f"Cannot verify a usable directory file ID for: {path.parent}")
+    name = path.name
+    if name not in names and _exists(path):
+        entry_stat = path.lstat()
+        for candidate in names:
+            if candidate.casefold() != name.casefold():
+                continue
+            candidate_stat = (path.parent / candidate).lstat()
+            if (
+                entry_stat.st_ino > 0
+                and stat.S_IFMT(entry_stat.st_mode)
+                == stat.S_IFMT(candidate_stat.st_mode)
+                and os.path.samestat(entry_stat, candidate_stat)
+            ):
+                name = candidate
+                break
+    return parent_stat.st_dev, parent_stat.st_ino, name
+
+
 def _validate_moves(moves: List[Tuple[Path, Path]], history_file: Path) -> None:
-    sources = {src for src, _ in moves}
-    destinations = {dst for _, dst in moves}
+    directory_names = {}
+    sources = {_entry_key(src, directory_names) for src, _ in moves}
+    destinations = {_entry_key(dst, directory_names) for _, dst in moves}
     if len(sources) != len(moves) or len(destinations) != len(moves):
         raise ValueError("A batch must have unique source and destination paths.")
     for src, dst in moves:
@@ -113,7 +142,7 @@ def _validate_moves(moves: List[Tuple[Path, Path]], history_file: Path) -> None:
             raise ValueError(f"Cannot rename a directory: {src}")
         if not dst.parent.is_dir():
             raise FileNotFoundError(f"Missing destination directory: {dst.parent}")
-        if _exists(dst) and dst not in sources:
+        if _exists(dst) and _entry_key(dst, directory_names) not in sources:
             raise FileExistsError(f"Cannot overwrite existing file: {dst}")
 
 
@@ -207,7 +236,7 @@ def execute_rename(
         for item in plan
         if item.has_changed
     ]
-    moves = [(src, dst) for src, dst in moves if src != dst]
+    moves = [(src, dst) for src, dst in moves if str(src) != str(dst)]
     if not moves:
         return 0, None
     # Refuse unreadable history before touching any files.

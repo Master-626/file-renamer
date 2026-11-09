@@ -510,3 +510,29 @@ def test_binary_open_flag_is_used_when_available(tmp_path, monkeypatch):
     fingerprint = capture_fingerprint(path)
     assert all(flags & fake_binary_flag for flags in seen)
     assert fingerprint.sha256 == hashlib.sha256(b"\r\n\x1a\x00").hexdigest()
+
+
+def test_stat_fields_after_rename(tmp_path):
+    """Expose OS stat/fstat differences instead of silently dropping fields."""
+    from file_renamer.identity import _stat_signature
+
+    first, second = tmp_path / "stat-first", tmp_path / "stat-second"
+    first.write_bytes(b"content")
+    first.rename(second)
+    before = second.lstat()
+    descriptor = os.open(second, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        current = os.fstat(descriptor)
+        assert _stat_signature(current) == _stat_signature(before), {
+            name: (getattr(before, name), getattr(current, name))
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        }
+    finally:
+        os.close(descriptor)

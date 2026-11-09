@@ -34,7 +34,7 @@ def test_cli_undo_after_changing_working_directory(
     assert result.exit_code == 0, result.output
     assert (original / "FILE.txt").read_text() == "original"
     assert (unrelated / "file.txt").read_text() == "unrelated"
-    assert not (unrelated / "FILE.txt").exists()
+    assert {path.name for path in unrelated.iterdir()} == {"file.txt"}
     result = runner.invoke(cli, ["undo"])
     assert result.exit_code != 0
     assert "No active transaction" in result.output
