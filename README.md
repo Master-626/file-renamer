@@ -156,7 +156,11 @@ rename/undo operations do not invalidate earlier batches.
 Hashing reads each regular file twice during rename and once during undo, which
 can be slow for large files. Unreadable files and filesystems without a usable
 file ID are refused even when directory permissions would allow a rename.
-Only regular files and symlinks are supported.
+Only regular files and symlinks are supported. Parent directories must also be
+readable so case-insensitive aliases can be distinguished from separate entries.
+Case-only renames preserve the requested directory spelling on supported
+filesystems. Collisions between two previously nonexistent names that differ
+only by case may be caught during final moves; rollback then restores the batch.
 
 These checks are evidence, not a perfect identity guarantee. Filesystems may
 reuse or misreport file IDs, and a replacement with the same ID, contents and
@@ -164,6 +168,6 @@ metadata cannot be distinguished. Fingerprints do not authenticate a modified
 history file. Concurrent modifications can still happen between checking and
 moving; no concurrent-swap, forced-termination or power-loss guarantee is added.
 The implementation uses Python's filesystem IDs and binary reads, with optional
-no-follow/nonblocking open flags where available. Windows, macOS, network and
-unusual filesystem behavior need their own validation before relying on these
-checks there.
+no-follow/nonblocking open flags where available. CI exercises Linux, Windows
+and macOS. Network and unusual filesystem behavior still need their own
+validation before relying on these checks there.

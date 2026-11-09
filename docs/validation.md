@@ -1,7 +1,8 @@
 # Undo identity validation
 
-Local candidate validated on Linux on 2026-11-09 against main commit
-`88ee58acae8346bb89373dc58f8f8b7bcfcea9e3`. This change is not published.
+Fingerprint and cross-platform fixes validated against main commit
+`88ee58acae8346bb89373dc58f8f8b7bcfcea9e3`. Hosted CI results are linked from
+the pull request; this report documents the tested behavior and limitations.
 
 ## Reproduction
 
@@ -14,13 +15,12 @@ already excluded external changes from its guarantees.
 
 ## Checks
 
-- 136 tests pass on Python 3.9.25, 3.12.14 and 3.13.5.
+- 145 tests pass on Python 3.9.25, 3.12.14 and 3.13.5.
 - The Python 3.9 run uses minimum declared Click 8.1.0, Rich 13.0.0 and
   pytest 8.0.0 versions.
 - Wheel and source distribution build successfully. A fresh Python 3.13
-  environment installed the wheel, and all 136 tests passed from outside the
+  environment installed the wheel, and all 145 tests passed from outside the
   source checkout with imports verified from site-packages.
-- Coverage: 88% overall; fingerprint and history modules each reach 100%.
 - `ruff check --isolated --select E4,E7,E9,F src tests`, byte compilation and
   `git diff --check` pass.
 
@@ -65,7 +65,18 @@ undone. No force switch or automatic migration is added. Unreadable files and
 filesystems without a usable file ID are refused. Hashing reads regular files
 twice during rename and once during undo, increasing runtime for large files.
 
-No Windows/macOS execution or remote CI has been run for this local candidate.
+Hosted CI passes on Ubuntu 22.04 (Python 3.9 and 3.13), macOS 15 (Python
+3.13), and Windows 2022 (Python 3.13). Linux/macOS run 145 tests; Windows
+runs 144 and skips the unavailable POSIX FIFO test. Symlink tests run on all
+three systems. Each job also builds wheel/sdist and checks the CLI entry point.
+
+The first cross-platform runs exposed case-only path comparisons and the
+Windows path-stat/fstat ctime discrepancy described in CPython issue #157671.
+The fixes preserve exact filename spelling and compare ctime only within the
+same stat API, retaining before/after checks. Case-alias detection also requires
+readable parent directories. Distinct hardlinks and symlinks remain protected
+from overwrites. New case-colliding destinations may be detected during final
+moves rather than preflight; rollback protection is tested.
 Python file IDs and timestamp behavior vary by filesystem; nonzero IDs are not
 a proof of uniqueness. Reused IDs together with identical contents and metadata
 cannot be distinguished, and modified history is not authenticated.
