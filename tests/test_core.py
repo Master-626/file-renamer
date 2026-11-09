@@ -13,6 +13,7 @@ from file_renamer.core import (
     find_files,
 )
 from file_renamer.history import HistoryManager, RenameRecord
+from file_renamer.identity import capture_fingerprint
 
 
 def make_batch(tmp_path):
@@ -46,7 +47,11 @@ def test_undo_from_another_directory_never_touches_unrelated_files(
     transaction = history.get_latest_active()
     assert transaction.id == tx_id
     assert transaction.records == [
-        RenameRecord(str(original / "FILE.txt"), str(original / "file.txt"))
+        RenameRecord(
+            str(original / "FILE.txt"),
+            str(original / "file.txt"),
+            capture_fingerprint(original / "file.txt"),
+        )
     ]
     monkeypatch.chdir(elsewhere)
     execute_undo(history)
@@ -82,7 +87,7 @@ def test_legacy_relative_history_is_rejected_without_any_changes(
     assert history.history_file.read_text() == before
 
 
-def test_legacy_absolute_history_remains_undoable(tmp_path):
+def test_legacy_absolute_history_without_identity_is_refused(tmp_path):
     directory, _ = make_batch(tmp_path)
     history = HistoryManager(tmp_path / "history.json")
     history.history_file.write_text(
@@ -101,19 +106,21 @@ def test_legacy_absolute_history_remains_undoable(tmp_path):
             ]
         )
     )
-    execute_undo(history)
-    assert_files(
-        directory, {"original.txt": "first payload", "B.txt": "second payload"}
-    )
+    before = history.history_file.read_bytes()
+    with pytest.raises(ValueError, match="without file fingerprints"):
+        execute_undo(history)
+    assert_files(directory, {"A.txt": "first payload", "B.txt": "second payload"})
+    assert history.history_file.read_bytes() == before
+    assert history.list_all()[0].records[0].fingerprint is None
 
 
 @pytest.mark.parametrize("problem", ["missing", "occupied", "broken_symlink"])
 def test_undo_preflights_entire_batch(tmp_path, problem):
     directory, originals = make_batch(tmp_path)
     history = HistoryManager(tmp_path / "history.json")
-    execute_rename(build_rename_plan(find_files(directory), pattern="lower"), history)
+    execute_rename(build_rename_plan(find_files(directory), prefix="renamed_"), history)
     if problem == "missing":
-        (directory / "a.txt").unlink()
+        (directory / "renamed_A.txt").unlink()
         expected_error = FileNotFoundError
     elif problem == "occupied":
         (directory / "A.txt").write_text("unrelated")
@@ -126,7 +133,7 @@ def test_undo_preflights_entire_batch(tmp_path, problem):
     with pytest.raises(expected_error):
         execute_undo(history)
     assert sorted(p.name for p in directory.iterdir()) == before_names
-    assert (directory / "b.txt").read_text() == originals["B.txt"]
+    assert (directory / "renamed_B.txt").read_text() == originals["B.txt"]
     assert history.history_file.read_bytes() == before_history
     if problem == "occupied":
         assert (directory / "A.txt").read_text() == "unrelated"
@@ -431,3 +438,97 @@ def test_empty_or_dot_transformed_names_are_rejected(tmp_path, name):
         with pytest.raises(ValueError, match="single filename"):
             build_rename_plan([file])
     assert file.read_text() == "payload"
+
+
+def test_case_only_rename_changes_actual_directory_spelling(tmp_path):
+    original = tmp_path / "MiXeD.txt"
+    original.write_text("payload")
+    history = HistoryManager(tmp_path / "history.json")
+    plan = build_rename_plan([original], pattern="lower")
+    assert plan[0].has_changed
+    count, _ = execute_rename(plan, history)
+    assert count == 1
+    assert {p.name for p in tmp_path.glob("*.txt")} == {"mixed.txt"}
+    execute_undo(history)
+    assert {p.name for p in tmp_path.glob("*.txt")} == {"MiXeD.txt"}
+    assert original.read_text() == "payload"
+
+
+def test_windows_path_case_changes_are_not_treated_as_noops():
+    from pathlib import PureWindowsPath
+
+    plan = build_rename_plan([PureWindowsPath("C:/files/MiXeD.txt")], pattern="lower")
+    assert plan[0].has_changed
+    assert plan[0].dst.name == "mixed.txt"
+
+
+@pytest.mark.parametrize("alias", ["hardlink", "symlink"])
+def test_separate_link_entry_cannot_be_overwritten(tmp_path, alias):
+    import os
+
+    source, destination = tmp_path / "A.txt", tmp_path / "B.txt"
+    source.write_text("payload")
+    if alias == "hardlink":
+        os.link(source, destination)
+    else:
+        destination.symlink_to(source)
+    history = HistoryManager(tmp_path / "history.json")
+    before = history.history_file.read_bytes()
+    with pytest.raises(FileExistsError, match="overwrite"):
+        execute_rename([RenamePlan(source, destination, True)], history)
+    assert source.read_text() == "payload"
+    assert destination.read_text() == "payload"
+    assert history.history_file.read_bytes() == before
+    if alias == "symlink":
+        assert destination.is_symlink()
+
+
+def test_duplicate_source_case_alias_is_rejected_before_staging(tmp_path, monkeypatch):
+    import file_renamer.core as core
+
+    source, alias = tmp_path / "A.txt", tmp_path / "a.txt"
+    source.write_text("payload")
+    history = HistoryManager(tmp_path / "history.json")
+    original_exists, original_lstat = core._exists, Path.lstat
+
+    def case_exists(path):
+        return str(path) == str(alias) or original_exists(path)
+
+    def case_lstat(path):
+        return original_lstat(source if str(path) == str(alias) else path)
+
+    monkeypatch.setattr(core, "_exists", case_exists)
+    monkeypatch.setattr(Path, "lstat", case_lstat)
+    with pytest.raises(ValueError, match="unique source"):
+        execute_rename(
+            [
+                RenamePlan(source, tmp_path / "first.txt", True),
+                RenamePlan(alias, tmp_path / "second.txt", True),
+            ],
+            history,
+        )
+    assert source.read_text() == "payload"
+    assert history.list_all() == []
+    assert not list(tmp_path.glob(".file-renamer-*"))
+
+
+def test_new_case_colliding_destinations_never_lose_files(tmp_path):
+    first, second = tmp_path / "A.txt", tmp_path / "B.txt"
+    first.write_text("first")
+    second.write_text("second")
+    case_sensitive = not (tmp_path / "a.txt").exists()
+    history = HistoryManager(tmp_path / "history.json")
+    plan = [
+        RenamePlan(first, tmp_path / "new.txt", True),
+        RenamePlan(second, tmp_path / "NEW.txt", True),
+    ]
+    if case_sensitive:
+        execute_rename(plan, history)
+        execute_undo(history)
+    else:
+        with pytest.raises(FileExistsError):
+            execute_rename(plan, history)
+        assert history.list_all() == []
+    assert first.read_text() == "first"
+    assert second.read_text() == "second"
+    assert not list(tmp_path.glob(".file-renamer-*"))
