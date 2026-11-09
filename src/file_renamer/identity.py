@@ -82,8 +82,13 @@ def capture_fingerprint(path: Path) -> FileFingerprint:
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         descriptor = os.open(path, flags)
         try:
-            if _stat_signature(os.fstat(descriptor)) != _stat_signature(before):
-                raise ValueError(f"File changed while checking its identity: {path}")
+            opened = os.fstat(descriptor)
+            if _stat_signature(opened) != _stat_signature(before):
+                raise ValueError(
+                    f"File changed while checking its identity: {path}; "
+                    f"path snapshot={_stat_signature(before)!r}, "
+                    f"descriptor snapshot={_stat_signature(opened)!r}"
+                )
             while True:
                 chunk = os.read(descriptor, 1024 * 1024)
                 if not chunk:
