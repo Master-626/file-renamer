@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+from file_renamer.identity import FileFingerprint
+
 HISTORY_DIR = Path.home() / ".file_renamer"
 HISTORY_FILE = HISTORY_DIR / "history.json"
 
@@ -22,6 +24,14 @@ def absolute_entry_path(path: Path) -> Path:
 class RenameRecord:
     src: str
     dst: str
+    fingerprint: Optional[FileFingerprint] = None
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "RenameRecord":
+        data = dict(value)
+        if data.get("fingerprint") is not None:
+            data["fingerprint"] = FileFingerprint.from_dict(data["fingerprint"])
+        return cls(**data)
 
 
 @dataclass
@@ -90,6 +100,7 @@ class HistoryManager:
                 RenameRecord(
                     src=str(absolute_entry_path(Path(record.src))),
                     dst=str(absolute_entry_path(Path(record.dst))),
+                    fingerprint=record.fingerprint,
                 )
                 for record in operations
             ],
@@ -104,7 +115,7 @@ class HistoryManager:
         data = self._load()
         for entry in reversed(data):
             if not entry.get("undone", False):
-                records = [RenameRecord(**r) for r in entry["records"]]
+                records = [RenameRecord.from_dict(r) for r in entry["records"]]
                 return Transaction(
                     id=entry["id"],
                     timestamp=entry["timestamp"],
@@ -125,7 +136,7 @@ class HistoryManager:
         data = self._load()
         transactions = []
         for entry in data:
-            records = [RenameRecord(**r) for r in entry.get("records", [])]
+            records = [RenameRecord.from_dict(r) for r in entry.get("records", [])]
             transactions.append(
                 Transaction(
                     id=entry["id"],

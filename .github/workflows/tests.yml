@@ -10,11 +10,19 @@ permissions:
 jobs:
   test:
     # Python 3.9 builds are unavailable on newer Ubuntu runner images.
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.13"]
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.9"
+          - os: ubuntu-22.04
+            python-version: "3.13"
+          - os: windows-2022
+            python-version: "3.13"
+          - os: macos-15
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

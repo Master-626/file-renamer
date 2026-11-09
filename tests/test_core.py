@@ -13,6 +13,7 @@ from file_renamer.core import (
     find_files,
 )
 from file_renamer.history import HistoryManager, RenameRecord
+from file_renamer.identity import capture_fingerprint
 
 
 def make_batch(tmp_path):
@@ -46,7 +47,11 @@ def test_undo_from_another_directory_never_touches_unrelated_files(
     transaction = history.get_latest_active()
     assert transaction.id == tx_id
     assert transaction.records == [
-        RenameRecord(str(original / "FILE.txt"), str(original / "file.txt"))
+        RenameRecord(
+            str(original / "FILE.txt"),
+            str(original / "file.txt"),
+            capture_fingerprint(original / "file.txt"),
+        )
     ]
     monkeypatch.chdir(elsewhere)
     execute_undo(history)
@@ -82,7 +87,7 @@ def test_legacy_relative_history_is_rejected_without_any_changes(
     assert history.history_file.read_text() == before
 
 
-def test_legacy_absolute_history_remains_undoable(tmp_path):
+def test_legacy_absolute_history_without_identity_is_refused(tmp_path):
     directory, _ = make_batch(tmp_path)
     history = HistoryManager(tmp_path / "history.json")
     history.history_file.write_text(
@@ -101,10 +106,12 @@ def test_legacy_absolute_history_remains_undoable(tmp_path):
             ]
         )
     )
-    execute_undo(history)
-    assert_files(
-        directory, {"original.txt": "first payload", "B.txt": "second payload"}
-    )
+    before = history.history_file.read_bytes()
+    with pytest.raises(ValueError, match="without file fingerprints"):
+        execute_undo(history)
+    assert_files(directory, {"A.txt": "first payload", "B.txt": "second payload"})
+    assert history.history_file.read_bytes() == before
+    assert history.list_all()[0].records[0].fingerprint is None
 
 
 @pytest.mark.parametrize("problem", ["missing", "occupied", "broken_symlink"])

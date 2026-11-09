@@ -7,6 +7,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from file_renamer.history import HistoryManager, RenameRecord, absolute_entry_path
+from file_renamer.identity import capture_fingerprint
 from file_renamer.transformers import transform_filename
 
 
@@ -211,11 +212,22 @@ def execute_rename(
         return 0, None
     # Refuse unreadable history before touching any files.
     existing_ids = {tx.id for tx in history.list_all()}
-    records = [RenameRecord(src=str(src), dst=str(dst)) for src, dst in moves]
+    _validate_moves(moves, history.history_file)
+    # Capture all identities before moving anything; a read/identity failure
+    # must leave the entire batch untouched.
+    records = [
+        RenameRecord(src=str(src), dst=str(dst), fingerprint=capture_fingerprint(src))
+        for src, dst in moves
+    ]
     tx_id = None
 
     def save_history() -> None:
         nonlocal tx_id
+        for record in records:
+            if capture_fingerprint(Path(record.dst)) != record.fingerprint:
+                raise ValueError(
+                    f"File changed during rename; history was not saved: {record.dst}"
+                )
         tx_id = history.record_batch(records).id
 
     def history_committed() -> bool:
@@ -253,6 +265,22 @@ def execute_undo(
 
     reverted = [(rec.dst, rec.src) for rec in reversed(latest_tx.records)]
     moves = [(Path(src), Path(dst)) for src, dst in reverted]
+    _validate_moves(moves, history.history_file)
+
+    if any(rec.fingerprint is None for rec in latest_tx.records):
+        raise ValueError(
+            "Cannot safely undo legacy history without file fingerprints. "
+            "No files were changed. Verify the files and restore names manually; "
+            "keep the history for reference."
+        )
+    # Validate the entire batch before moving any entry. In-place edits are
+    # intentionally refused too: matching pathnames alone are not sufficient.
+    for rec in latest_tx.records:
+        if capture_fingerprint(Path(rec.dst)) != rec.fingerprint:
+            raise ValueError(
+                f"Cannot safely undo: file identity or contents changed: {rec.dst}. "
+                "No files were changed. Inspect files and history before retrying."
+            )
 
     def history_committed() -> bool:
         return any(tx.id == latest_tx.id and tx.undone for tx in history.list_all())
