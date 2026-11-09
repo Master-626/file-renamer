@@ -512,8 +512,8 @@ def test_binary_open_flag_is_used_when_available(tmp_path, monkeypatch):
     assert fingerprint.sha256 == hashlib.sha256(b"\r\n\x1a\x00").hexdigest()
 
 
-def test_stat_fields_after_rename(tmp_path):
-    """Expose OS stat/fstat differences instead of silently dropping fields."""
+def test_shared_stat_fields_after_rename(tmp_path):
+    """ctime has API-specific meanings on Windows, unlike these fields."""
     from file_renamer.identity import _stat_signature
 
     first, second = tmp_path / "stat-first", tmp_path / "stat-second"
@@ -523,7 +523,7 @@ def test_stat_fields_after_rename(tmp_path):
     descriptor = os.open(second, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     try:
         current = os.fstat(descriptor)
-        assert _stat_signature(current) == _stat_signature(before), {
+        assert _stat_signature(current, False) == _stat_signature(before, False), {
             name: (getattr(before, name), getattr(current, name))
             for name in (
                 "st_dev",
@@ -536,3 +536,58 @@ def test_stat_fields_after_rename(tmp_path):
         }
     finally:
         os.close(descriptor)
+
+
+def test_ctime_can_differ_between_path_and_descriptor_apis(tmp_path, monkeypatch):
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"payload")
+    expected = capture_fingerprint(path)
+    actual_fstat = os.fstat
+
+    def alternative_ctime(descriptor):
+        result = actual_fstat(descriptor)
+        fields = {
+            name: getattr(result, name)
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        }
+        fields["st_ctime_ns"] += 1_000_000
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(os, "fstat", alternative_ctime)
+    assert capture_fingerprint(path) == expected
+
+
+def test_descriptor_ctime_change_during_read_is_still_rejected(tmp_path, monkeypatch):
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"payload")
+    actual_fstat = os.fstat
+    calls = 0
+
+    def changing_ctime(descriptor):
+        nonlocal calls
+        calls += 1
+        result = actual_fstat(descriptor)
+        fields = {
+            name: getattr(result, name)
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        }
+        fields["st_ctime_ns"] += calls * 1_000_000
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(os, "fstat", changing_ctime)
+    with pytest.raises(ValueError, match="changed while checking"):
+        capture_fingerprint(path)

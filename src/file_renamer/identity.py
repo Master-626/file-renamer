@@ -54,17 +54,17 @@ class FileFingerprint:
         return fingerprint
 
 
-def _stat_signature(value: os.stat_result) -> tuple:
-    # ctime is useful while taking one snapshot, but is deliberately NOT saved:
-    # our own renames change it and would invalidate successive undo operations.
-    return (
+def _stat_signature(value: os.stat_result, include_ctime: bool = True) -> tuple:
+    # Windows path stat can expose creation time as ctime while fstat exposes
+    # change time (CPython #157671). Compare ctime only within the same API.
+    signature = (
         value.st_dev,
         value.st_ino,
         value.st_mode,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
     )
+    return signature + (value.st_ctime_ns,) if include_ctime else signature
 
 
 def capture_fingerprint(path: Path) -> FileFingerprint:
@@ -83,18 +83,16 @@ def capture_fingerprint(path: Path) -> FileFingerprint:
         descriptor = os.open(path, flags)
         try:
             opened = os.fstat(descriptor)
-            if _stat_signature(opened) != _stat_signature(before):
-                raise ValueError(
-                    f"File changed while checking its identity: {path}; "
-                    f"path snapshot={_stat_signature(before)!r}, "
-                    f"descriptor snapshot={_stat_signature(opened)!r}"
-                )
+            if _stat_signature(opened, include_ctime=False) != _stat_signature(
+                before, include_ctime=False
+            ):
+                raise ValueError(f"File changed while checking its identity: {path}")
             while True:
                 chunk = os.read(descriptor, 1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
-            if _stat_signature(os.fstat(descriptor)) != _stat_signature(before):
+            if _stat_signature(os.fstat(descriptor)) != _stat_signature(opened):
                 raise ValueError(f"File changed while checking its identity: {path}")
         finally:
             os.close(descriptor)
