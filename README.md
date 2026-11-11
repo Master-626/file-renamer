@@ -1,18 +1,33 @@
 # file-renamer
 
+## 中文简介
+
+`file-renamer` 是一个可撤销的批量重命名命令行工具。它能对文件名做大小写、空格替换、去数字、去特殊字符、前缀、后缀和序号处理，也可用重复的 `--replace OLD NEW` 做区分大小写的字面替换。字面替换最先执行，因此可以改扩展名；随后的模式、序号、前缀和后缀只改主文件名，并保留最后一段扩展名（`.env.local` 会保留 `.local`，`.env` 和 `.gitignore` 没有扩展名）。
+
+`--dry-run` 只预览，不写文件、也不写历史，但会做与正式执行相同的路径和冲突检查。目标已存在、名字不是单个文件名，或会动到历史文件时，预览会失败并保持目录不变。`--ext .tar.gz` 这类复合扩展名可以用来过滤。撤销会核对文件指纹；内容或身份变了就会整批拒绝。
+
+```bash
+pip install -e ".[dev]"
+ruff check src tests
+pytest
+```
+
+下文是完整英文说明。
+
 [![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CLI Tool](https://img.shields.io/badge/CLI-Tool-green.svg)]()
 
-A fast, production-grade CLI utility for batch renaming files. Features rich terminal outputs, dry-run safety checks, recursive directory scanning, and a complete transaction-based undo history.
+Batch-rename files from the terminal. The command shows a preview, refuses names that would leave the directory or overwrite an unrelated entry, and records each batch so it can be undone.
 
 ## ✨ Features
 
-- **Built-in Transformations**: Lowercase, uppercase, title case, space replacement, prefix/suffix, sequential numbering, remove numbers, and remove special characters.
-- **Safety First**: Dry-run preview (`--dry-run`) enabled on all mutating commands.
-- **Collision Protection**: Checks for existing target files or conflicting target names before executing.
+- **Built-in Transformations**: Lowercase, uppercase, title case, space replacement, prefix/suffix, sequential numbering, remove numbers, and remove special characters. Patterns change the stem and keep the final suffix (`FILE NAME.txt`, not `FILE NAME.TXT`).
+- **Literal replace**: Repeatable `--replace OLD NEW`, applied to the original filename before those transforms. `OLD` is literal text, not a regular expression, and `NEW` may be empty.
+- **Safety First**: `--dry-run` prints the plan and runs the same path and collision checks as a real rename, without writing files or history.
+- **Collision Protection**: Refuses an existing target unless that entry is itself being renamed away in the same batch. Two files that map to one new name are also refused.
 - **Undo History**: Transactional rollbacks. Undo your last operation with a single command or view historical batches.
-- **Filtering**: Target specific extensions (e.g., `--ext .png`) and recursively traverse directories (`-r/--recursive`).
+- **Filtering**: Target an extension (`--ext .png`, `png`, or a compound suffix such as `--ext .tar.gz`) and recursively traverse directories (`-r/--recursive`).
 - **Terminal UI**: Visual side-by-side previews with colors and tables powered by Rich.
 
 ---
@@ -47,7 +62,16 @@ file-renamer rename ./photos --pattern lower --prefix "vacation_" --dry-run
 file-renamer rename ./photos --pattern lower --prefix "vacation_"
 ```
 
-### 5. Undo Operations
+### 5. Literal replace, then undo
+`--replace` runs before `--pattern`, so the extension can change and the stem is still normalized:
+
+```bash
+file-renamer rename ./photos --replace IMG_ vacation_ --replace .JPEG .jpg --pattern lower --dry-run
+file-renamer rename ./photos --replace IMG_ vacation_ --replace .JPEG .jpg --pattern lower
+file-renamer undo
+```
+
+### 6. Undo Operations
 ```bash
 # Inspect history
 file-renamer history
@@ -64,15 +88,16 @@ file-renamer rename [DIRECTORY] [OPTIONS]
 ```
 
 **Options:**
-- `-p, --pattern`: Choose from `lower`, `upper`, `title`, `kebab-spaces`, `snake-spaces`, `remove-numbers`, `remove-special`.
-- `--prefix TEXT`: Prepend a string to filenames.
-- `--suffix TEXT`: Append a string to filenames (before extension).
-- `--sequence`: Add sequential numbers (1, 2, ...).
-- `--start INT`: Sequential numbering start index (default: 1).
+- `-p, --pattern`: Choose from `lower`, `upper`, `title`, `kebab-spaces`, `snake-spaces`, `remove-numbers`, `remove-special`. The pattern changes the stem only. `upper` turns `file name.txt` into `FILE NAME.txt`.
+- `--prefix TEXT`: Prepend a string to the stem.
+- `--suffix TEXT`: Append a string to the stem, before the extension. `.env.local` becomes `.env_bak.local` with `--suffix _bak`; `.gitignore` has no extension, so the same suffix becomes `.gitignore_bak`.
+- `--replace OLD NEW`: Replace every literal occurrence of `OLD` with `NEW` in the original filename. Repeat the option to apply several pairs, in order. `OLD` is case-sensitive and must not be empty. An empty `NEW` deletes `OLD`. This step runs before `--pattern`, so it can change the extension. A result that contains a path separator, a drive prefix, or is empty, `.`, or `..` is rejected.
+- `--sequence`: Add sequential numbers (1, 2, ...) in sorted path order, across the whole selection.
+- `--start INT`: Sequential numbering start index (default: 1). Ignored unless `--sequence` is set.
 - `--padding INT`: Zero-padding width for sequence (default: 2).
-- `-e, --ext TEXT`: Filter by file extension (e.g., `.txt` or `txt`).
-- `-r, --recursive`: Recursively traverse directories.
-- `-d, --dry-run`: Preview changes without renaming.
+- `-e, --ext TEXT`: Keep files whose final suffix matches (`.txt` or `txt`). A filter with more than one dot, such as `.tar.gz`, matches that compound suffix. Matching is case-insensitive. `.jpg` does not match `.jpeg` or a file named `.jpg`.
+- `-r, --recursive`: Recursively traverse directories. The preview shows paths relative to the directory you passed, so nested files with the same filename stay distinct.
+- `-d, --dry-run`: Print the plan and run collision, path, and history-file checks without renaming and without creating history. It does not hash file contents; a later real run still does.
 
 ### `file-renamer undo`
 Reverts the operations in the latest transaction batch.
@@ -82,8 +107,11 @@ Displays a table of previous rename batches and their current revert status.
 
 ## 🧪 Testing
 
+Development installs include pytest and Ruff. The commands below are the same checks GitHub Actions runs. CI tests Python 3.9 through 3.13 on Ubuntu 22.04, plus Python 3.13 on Windows and macOS, then builds the package and runs `file-renamer --help`.
+
 ```bash
 pip install -e ".[dev]"
+ruff check src tests
 pytest
 ```
 

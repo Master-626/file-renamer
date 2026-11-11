@@ -11,6 +11,7 @@ from file_renamer.core import (
     execute_rename,
     execute_undo,
     find_files,
+    preflight_rename,
 )
 from file_renamer.history import HistoryManager, RenameRecord
 from file_renamer.identity import capture_fingerprint
@@ -510,6 +511,107 @@ def test_duplicate_source_case_alias_is_rejected_before_staging(tmp_path, monkey
     assert source.read_text() == "payload"
     assert history.list_all() == []
     assert not list(tmp_path.glob(".file-renamer-*"))
+
+
+@pytest.mark.parametrize(
+    ("name", "extension", "expected"),
+    [
+        ("photo.JPG", "jpg", True),
+        ("photo.JPG", ".jpg", True),
+        ("photo.jpeg", ".jpg", False),
+        ("photo.jpgx", ".jpg", False),
+        ("photo.jpg.bak", ".jpg", False),
+        (".jpg", ".jpg", False),
+        ("archive.tar.gz", ".gz", True),
+        ("archive.tar.gz", "gz", True),
+        ("archive.tar.gz", ".tar.gz", True),
+        ("archive.tar.gz", "tar.gz", True),
+        ("Archive.TAR.GZ", ".tar.gz", True),
+        ("nottar.gz", ".tar.gz", False),
+        ("notes.txt", ".tar.gz", False),
+        (".env.local", ".local", True),
+        ("config.env.local", ".env.local", True),
+        (".gitignore", ".gitignore", False),
+        ("notes.gitignore", "gitignore", True),
+    ],
+)
+def test_extension_filter_matches_final_and_compound_suffixes(tmp_path, name, extension, expected):
+    (tmp_path / name).write_text("x")
+    found = find_files(tmp_path, extension=extension)
+    assert [path.name for path in found] == ([name] if expected else [])
+
+
+def test_compound_extension_filter_skips_unrelated_files(tmp_path):
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (tmp_path / "archive.tar.gz").write_text("gz")
+    (tmp_path / "archive.tar.bz2").write_text("bz2")
+    (nested / "Photo.JPG").write_text("pic")
+    (tmp_path / "notes.txt").write_text("txt")
+    assert [path.name for path in find_files(tmp_path, extension=".tar.gz")] == ["archive.tar.gz"]
+    assert find_files(tmp_path, recursive=True, extension="JPG") == [nested / "Photo.JPG"]
+
+
+def test_replace_cannot_escape_the_directory(tmp_path):
+    file = tmp_path / "a.txt"
+    file.write_text("payload")
+    for replacement in ("../a.txt", "..", "", "a/b"):
+        with pytest.raises(ValueError, match="single filename"):
+            build_rename_plan([file], replacements=[("a.txt", replacement)])
+    assert file.read_text() == "payload"
+    assert not (tmp_path / "a.txt").is_dir()
+
+
+def test_preflight_missing_history_does_not_touch_files(tmp_path):
+    file = tmp_path / "A.txt"
+    file.write_text("x")
+    history = tmp_path / "missing-history.json"
+    plan = build_rename_plan([file], pattern="lower")
+    preflight_rename(plan, history)
+    assert plan[0].dst.name == "a.txt"
+    assert file.read_text() == "x"
+    assert not history.exists()
+    assert list(tmp_path.glob(".file-renamer-*")) == []
+
+
+@pytest.mark.parametrize("occupier", ["directory", "dangling-symlink"])
+def test_preflight_rejects_destination_occupied_by_a_non_file(tmp_path, occupier):
+    source = tmp_path / "a.txt"
+    source.write_text("payload")
+    occupied = tmp_path / "pre_a.txt"
+    if occupier == "directory":
+        occupied.mkdir()
+    else:
+        occupied.symlink_to("missing-target")
+    plan = build_rename_plan([source], prefix="pre_")
+    assert plan[0].dst.name == "pre_a.txt"
+    history = tmp_path / "history.json"
+    with pytest.raises(FileExistsError, match="overwrite"):
+        preflight_rename(plan, history)
+    assert source.read_text() == "payload"
+    assert not history.exists()
+    assert list(tmp_path.glob(".file-renamer-*")) == []
+
+
+def test_preflight_allows_a_rename_chain(tmp_path):
+    first = tmp_path / "a.txt"
+    second = tmp_path / "pre_a.txt"
+    first.write_text("a")
+    second.write_text("b")
+    history_path = tmp_path / "history.json"
+    plan = build_rename_plan(find_files(tmp_path), prefix="pre_")
+    preflight_rename(plan, history_path)
+    assert {item.dst.name for item in plan} == {"pre_a.txt", "pre_pre_a.txt"}
+    assert not history_path.exists()
+    history = HistoryManager(history_path)
+    execute_rename(plan, history)
+    assert not first.exists()
+    assert (tmp_path / "pre_a.txt").read_text() == "a"
+    assert (tmp_path / "pre_pre_a.txt").read_text() == "b"
+    execute_undo(history)
+    assert first.read_text() == "a"
+    assert second.read_text() == "b"
+    assert not (tmp_path / "pre_pre_a.txt").exists()
 
 
 def test_new_case_colliding_destinations_never_lose_files(tmp_path):

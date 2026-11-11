@@ -19,6 +19,28 @@ class RenamePlan:
     has_changed: bool
 
 
+def _normalize_extension(extension: str) -> str:
+    ext = extension.lower()
+    if not ext.startswith("."):
+        ext = "." + ext
+    return ext
+
+
+def _matches_extension(path: Path, ext: str) -> bool:
+    """Match a final suffix, or a compound suffix such as ``.tar.gz``.
+
+    One-dot filters stay aligned with ``Path.suffix``, so ``.jpg`` does not
+    match ``.jpeg`` or a file named ``.jpg``. Filters with more than one dot
+    match the end of the filename when a non-empty stem remains.
+    """
+    if path.suffix.lower() == ext:
+        return True
+    if ext.count(".") < 2:
+        return False
+    name = path.name.lower()
+    return len(name) > len(ext) and name.endswith(ext)
+
+
 def find_files(
     directory: Path,
     recursive: bool = False,
@@ -34,10 +56,8 @@ def find_files(
     files = [p for p in iterator if p.is_file()]
 
     if extension:
-        ext = extension.lower()
-        if not ext.startswith("."):
-            ext = "." + ext
-        files = [p for p in files if p.suffix.lower() == ext]
+        ext = _normalize_extension(extension)
+        files = [p for p in files if _matches_extension(p, ext)]
 
     return sorted(files)
 
@@ -50,6 +70,7 @@ def build_rename_plan(
     sequence: bool = False,
     start: int = 1,
     padding: int = 2,
+    replacements: Optional[Iterable[Tuple[str, str]]] = None,
 ) -> List[RenamePlan]:
     """Generate mapping of source to destination paths and validate collisions."""
     plan: List[RenamePlan] = []
@@ -64,6 +85,7 @@ def build_rename_plan(
             suffix=suffix,
             sequence_num=seq_val,
             padding=padding,
+            replacements=replacements,
         )
         if (
             new_name in ("", ".", "..")
@@ -130,8 +152,12 @@ def _validate_moves(moves: List[Tuple[Path, Path]], history_file: Path) -> None:
         raise ValueError("A batch must have unique source and destination paths.")
     for src, dst in moves:
         for path in (src, dst):
+            # samefile() raises FileNotFoundError when history does not exist yet.
+            # Dry-run preflight runs before that file is created.
             if absolute_entry_path(path) == history_file or (
-                path.exists() and path.samefile(history_file)
+                path.exists()
+                and history_file.exists()
+                and path.samefile(history_file)
             ):
                 raise ValueError(
                     f"Cannot rename the history file or its aliases: {path}"
@@ -225,18 +251,31 @@ def _apply_moves(
                 pass
 
 
+def rename_moves(plan: List[RenamePlan]) -> List[Tuple[Path, Path]]:
+    """Absolute moves for entries whose anchored path actually changes."""
+    moves = [
+        (absolute_entry_path(item.src), absolute_entry_path(item.dst))
+        for item in plan
+        if item.has_changed
+    ]
+    return [(src, dst) for src, dst in moves if str(src) != str(dst)]
+
+
+def preflight_rename(plan: List[RenamePlan], history_file: Path) -> None:
+    """Raise the same path and collision errors as execution, without writing.
+
+    Does not create the history file, stage files, or hash contents.
+    """
+    _validate_moves(rename_moves(plan), absolute_entry_path(history_file))
+
+
 def execute_rename(
     plan: List[RenamePlan],
     history_mgr: Optional[HistoryManager] = None,
 ) -> Tuple[int, Optional[str]]:
     """Execute the rename plan, returning renamed count and transaction ID."""
     history = history_mgr or HistoryManager()
-    moves = [
-        (absolute_entry_path(item.src), absolute_entry_path(item.dst))
-        for item in plan
-        if item.has_changed
-    ]
-    moves = [(src, dst) for src, dst in moves if str(src) != str(dst)]
+    moves = rename_moves(plan)
     if not moves:
         return 0, None
     # Refuse unreadable history before touching any files.

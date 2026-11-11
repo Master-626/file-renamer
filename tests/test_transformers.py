@@ -37,3 +37,49 @@ def test_transform_filename_extensionless():
 def test_transform_filename_hidden_file():
     result = transform_filename(".gitignore", suffix="_backup")
     assert result == ".gitignore_backup"
+
+
+def test_hidden_name_keeps_a_real_extension():
+    # Names that only look extensionless because they start with a dot used to
+    # absorb the suffix into the stem: ".env.local" + "_bak" became
+    # ".env.local_bak", and uppercasing rewrote ".Local".
+    assert transform_filename(".env", suffix="_backup") == ".env_backup"
+    assert transform_filename(".env.local", suffix="_bak") == ".env_bak.local"
+    assert transform_filename(".Env.Local", pattern="upper") == ".ENV.Local"
+    assert transform_filename(".Env.Local", pattern="lower") == ".env.Local"
+    assert transform_filename("..secret.txt", suffix="_bak") == "..secret_bak.txt"
+    # The digit sits in the stem, so the ".env" suffix is unchanged.
+    assert transform_filename(".v2.env", pattern="remove-numbers") == ".v.env"
+
+
+def test_trailing_dot_split_stays_compatible():
+    assert transform_filename("foo.", suffix="_x") == "foo_x."
+    assert transform_filename("a.b.", pattern="upper") == "A.B."
+    assert transform_filename("My File.TAR.GZ", pattern="lower", suffix="_v2") == "my file.tar_v2.GZ"
+    assert transform_filename("file name.txt", pattern="upper") == "FILE NAME.txt"
+
+
+def test_replace_is_literal_and_runs_before_other_transforms():
+    assert transform_filename("a.txt", replacements=[(".", "_")]) == "a_txt"
+    assert transform_filename("Photo.txt", replacements=[("photo", "pic")]) == "Photo.txt"
+    assert transform_filename("ab.txt", replacements=[("a", "")]) == "b.txt"
+    assert transform_filename("ab.txt", replacements=[("a", "b"), ("b", "c")]) == "cc.txt"
+    assert (
+        transform_filename(
+            "IMG_1.JPEG",
+            replacements=[("IMG_", "vacation_"), (".JPEG", ".jpg")],
+            pattern="lower",
+            prefix="pre_",
+        )
+        == "pre_vacation_1.jpg"
+    )
+    assert transform_filename("My File.JPEG", replacements=[(".JPEG", ".jpg")], pattern="lower") == (
+        "my file.jpg"
+    )
+
+
+def test_empty_or_non_string_replacement_is_rejected():
+    with pytest.raises(ValueError, match="must not be empty"):
+        transform_filename("a.txt", replacements=[("", "x")])
+    with pytest.raises(ValueError, match="pair of strings"):
+        transform_filename("a.txt", replacements=[(1, "x")])
