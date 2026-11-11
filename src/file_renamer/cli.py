@@ -1,21 +1,28 @@
 """Command Line Interface for file-renamer."""
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import click
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from file_renamer.core import build_rename_plan, execute_rename, execute_undo, find_files
+from file_renamer import __version__, history as history_module
+from file_renamer.core import (
+    build_rename_plan,
+    execute_rename,
+    execute_undo,
+    find_files,
+    preflight_rename,
+)
 from file_renamer.history import HistoryManager
 
 console = Console()
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__, prog_name="file-renamer")
 def cli():
     """File Renamer: Batch rename files with safety, previews, and undo history."""
     pass
@@ -30,19 +37,31 @@ def patterns():
     table.add_column("Example (Before -> After)", style="green")
 
     table.add_row("lower", "Lowercase all characters", "File NAME.txt -> file name.txt")
-    table.add_row("upper", "Uppercase all characters", "file name.txt -> FILE NAME.TXT")
+    table.add_row("upper", "Uppercase the stem; keep the extension", "file name.txt -> FILE NAME.txt")
     table.add_row("title", "Capitalize each word", "my vacation.png -> My Vacation.png")
     table.add_row("kebab-spaces", "Convert whitespace to dashes", "my file test.doc -> my-file-test.doc")
     table.add_row("snake-spaces", "Convert whitespace to underscores", "my file test.doc -> my_file_test.doc")
     table.add_row("remove-numbers", "Strip all numeric digits", "img_001_final.jpg -> img__final.jpg")
-    table.add_row("remove-special", "Remove characters except letters, numbers, and dashes", "doc#1 (v2).pdf -> doc1v2.pdf")
+    table.add_row(
+        "remove-special",
+        "Remove characters other than letters, numbers, underscores, and dashes",
+        "doc#1 (v2).pdf -> doc1v2.pdf",
+    )
 
     console.print(table)
 
 
+def _preview_label(path: Path, root: Path) -> str:
+    """Show a path relative to the rename root when it is not a bare filename."""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
+
+
 @cli.command("list")
 @click.argument("directory", type=click.Path(exists=True, file_okay=False, path_type=Path), default=".")
-@click.option("-e", "--ext", type=str, help="Filter by file extension (e.g. .jpg or jpg)")
+@click.option("-e", "--ext", type=str, help="Filter by extension (e.g. .jpg, jpg, or .tar.gz)")
 @click.option("-r", "--recursive", is_flag=True, help="Scan directory recursively")
 def list_files(directory: Path, ext: Optional[str], recursive: bool):
     """List files in a directory that match filter criteria."""
@@ -82,10 +101,21 @@ def list_files(directory: Path, ext: Optional[str], recursive: bool):
 )
 @click.option("--prefix", default="", help="Prefix to prepend to filenames.")
 @click.option("--suffix", default="", help="Suffix to append to filenames (before extension).")
+@click.option(
+    "--replace",
+    "replacements",
+    nargs=2,
+    multiple=True,
+    metavar="OLD NEW",
+    help=(
+        "Replace literal OLD with NEW in the original filename before other "
+        "transforms. Repeatable. NEW may be empty to delete OLD."
+    ),
+)
 @click.option("--sequence", is_flag=True, help="Add sequential numbering.")
 @click.option("--start", default=1, type=int, help="Sequential number starting index.")
 @click.option("--padding", default=2, type=int, help="Zero-padding width for sequence.")
-@click.option("-e", "--ext", type=str, help="Target specific extension.")
+@click.option("-e", "--ext", type=str, help="Target one extension, including a compound suffix such as .tar.gz.")
 @click.option("-r", "--recursive", is_flag=True, help="Process subdirectories recursively.")
 @click.option("-d", "--dry-run", is_flag=True, help="Simulate changes without modifying filesystem.")
 def rename(
@@ -93,6 +123,7 @@ def rename(
     pattern: Optional[str],
     prefix: str,
     suffix: str,
+    replacements: Tuple[Tuple[str, str], ...],
     sequence: bool,
     start: int,
     padding: int,
@@ -115,6 +146,7 @@ def rename(
             sequence=sequence,
             start=start,
             padding=padding,
+            replacements=replacements,
         )
     except Exception as e:
         console.print(f"[bold red]Configuration error:[/bold red] {e}")
@@ -134,11 +166,18 @@ def rename(
     table.add_column("New Filename", style="bold green")
 
     for item in changes:
-        table.add_row(item.src.name, item.dst.name)
+        table.add_row(_preview_label(item.src, directory), _preview_label(item.dst, directory))
 
     console.print(table)
 
     if dry_run:
+        try:
+            # Look up HISTORY_FILE at call time so tests can redirect it.
+            preflight_rename(plan, history_module.HISTORY_FILE)
+        except Exception as e:
+            console.print(f"[bold red]Dry-run failed:[/bold red] {e}")
+            console.print("[bold yellow]No changes were written to disk.[/bold yellow]")
+            raise click.Abort()
         console.print("\n[bold yellow]Dry-run mode active.[/bold yellow] No changes were written to disk.")
         return
 
